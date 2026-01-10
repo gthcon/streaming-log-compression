@@ -9,7 +9,7 @@
     "v10_zstd_3": 263823,
     "v10_zstd_19": 157477,
     "v10_fast": 189975,
-    "v10_streaming": 428871,
+    "v10_streaming": 457171,
     "v10_streaming_smart": 525852
   },
   "windows_50mb.log": {
@@ -22,7 +22,7 @@
     "v10_zstd_3": 186380,
     "v10_zstd_19": 128942,
     "v10_fast": 178247,
-    "v10_streaming": 267807,
+    "v10_streaming": 249770,
     "v10_streaming_smart": 252431
   },
   "thunderbird_50mb.log": {
@@ -35,7 +35,7 @@
     "v10_zstd_3": 3072616,
     "v10_zstd_19": 2230812,
     "v10_fast": 3115727,
-    "v10_streaming": 3494011,
+    "v10_streaming": 3606449,
     "v10_streaming_smart": 3375404
   },
   "hdfs_50mb.log": {
@@ -48,7 +48,7 @@
     "v10_zstd_3": 64741,
     "v10_zstd_19": 53542,
     "v10_fast": 59324,
-    "v10_streaming": 54313,
+    "v10_streaming": 54341,
     "v10_streaming_smart": 54351
   },
   "mac_50mb.log": {
@@ -61,7 +61,7 @@
     "v10_zstd_3": 2940384,
     "v10_zstd_19": 815616,
     "v10_fast": 968746,
-    "v10_streaming": 2560590,
+    "v10_streaming": 1621286,
     "v10_streaming_smart": 2569294
   },
   "apache_combined_50mb.log": {
@@ -74,7 +74,7 @@
     "v10_zstd_3": 2603073,
     "v10_zstd_19": 2111780,
     "v10_fast": 2590003,
-    "v10_streaming": 4959492,
+    "v10_streaming": 4842900,
     "v10_streaming_smart": 4903550
   },
   "nasa_50mb.log": {
@@ -98,7 +98,7 @@
     "v10_zstd_3": 328227,
     "v10_zstd_19": 239329,
     "v10_fast": 327063,
-    "v10_streaming": 683888,
+    "v10_streaming": 683890,
     "v10_streaming_smart": 683888
   },
   "cloudtrail_50mb.log": {
@@ -124,7 +124,7 @@
     "v10_zstd_3": 4694900,
     "v10_zstd_19": 3114679,
     "v10_fast": 3774125,
-    "v10_streaming": 4161094,
+    "v10_streaming": 4161098,
     "v10_streaming_smart": 4161094
   },
   "elastic_web_50mb.log": {

@@ -337,7 +337,13 @@ def analyze_column(values: List[str]) -> str:
     if all(is_safe_numeric(v) for v in present):
         return 'numeric_string'
 
+    # Check for URL paths (start with /) - use dictionary for these
+    if all(isinstance(v, str) and v.startswith('/') for v in present):
+        return 'path'
+
     # Check cardinality for dictionary encoding (lossless, safe for mixed data)
+    # Dictionary encoding works best when unique values are low (<=256 fits in 1 byte index)
+    # Higher cardinality means bigger dictionary which may not compress well with zstd
     unique = set(values)
     if len(unique) <= 256:  # Low cardinality - dictionary encode
         return 'low_cardinality'
@@ -378,8 +384,8 @@ def encode_smart_column(output: io.BytesIO, values: List[str], n_rows: int) -> N
         encode_numeric_column(output, values)
         return
 
-    # Dictionary encoding for low cardinality
-    if col_type == 'low_cardinality':
+    # Dictionary encoding for low cardinality or paths
+    if col_type == 'low_cardinality' or col_type == 'path':
         output.write(bytes([COL_DICT]))
         encode_dict_column(output, values)
         return
@@ -1041,6 +1047,9 @@ class StreamingEncoder:
         self.use_raw_text = False
         self.chunks_since_fallback = 0
 
+        # Track which templates have been written to stream (for incremental template writing)
+        self.written_template_ids: Set[int] = set()
+
         # Write header
         self._write_header()
 
@@ -1513,23 +1522,33 @@ class StreamingEncoder:
             else:
                 template_data.append((-1, [processed]))
 
-        # Write templates used in this chunk
-        template_list = sorted(chunk_templates.items())
-        output.write(encode_varint(len(template_list)))
-        for tid, template in template_list:
+        # Write only NEW templates (not already written in previous chunks)
+        # Format: [n_new_templates] [tid, len, content]...
+        new_templates = [(tid, tmpl) for tid, tmpl in sorted(chunk_templates.items())
+                         if tid not in self.written_template_ids]
+        output.write(encode_varint(len(new_templates)))
+        for tid, template in new_templates:
             output.write(encode_varint(tid))
             tmpl_bytes = template.encode('utf-8')
             output.write(encode_varint(len(tmpl_bytes)))
             output.write(tmpl_bytes)
+            self.written_template_ids.add(tid)
 
-        # Create local template index
+        # Write template ID mapping for this chunk (ALL templates used, even old ones)
+        # This allows decoder to know which global tids map to which local indices
+        template_list = sorted(chunk_templates.items())
+        output.write(encode_varint(len(template_list)))
+        for tid, _ in template_list:
+            output.write(encode_varint(tid))  # Just write the global tid
+
+        # Create local template index (maps global tid to chunk-local index)
         tid_to_local = {tid: i for i, (tid, _) in enumerate(template_list)}
 
         # COLUMNAR encoding for better compression
         n_lines = len(template_data)
         output.write(encode_varint(n_lines))
 
-        # Column 1: Template indices (bit-packed)
+        # Column 1: Template indices (bit-packed) - uses local indices
         indices = []
         for tid, variables in template_data:
             if tid < 0:
@@ -1905,17 +1924,24 @@ class StreamingDecoder:
         """Decode template-encoded text lines (columnar format)."""
         pos = 0
 
-        # Read templates for this chunk
-        n_templates, pos = decode_varint(data, pos)
-        local_templates = {}
-
-        for i in range(n_templates):
+        # Read NEW templates for this chunk (incremental)
+        n_new_templates, pos = decode_varint(data, pos)
+        for _ in range(n_new_templates):
             tid, pos = decode_varint(data, pos)
             tmpl_len, pos = decode_varint(data, pos)
             template = data[pos:pos+tmpl_len].decode('utf-8')
             pos += tmpl_len
-            local_templates[i] = template  # Map local index to template
-            self.templates[tid] = template  # Update global state
+            self.templates[tid] = template  # Add to global state
+
+        # Read template ID mapping for this chunk (maps local indices to global tids)
+        n_chunk_templates, pos = decode_varint(data, pos)
+        local_to_tid = []
+        for _ in range(n_chunk_templates):
+            tid, pos = decode_varint(data, pos)
+            local_to_tid.append(tid)
+
+        # Build local_templates from global state using the mapping
+        local_templates = {i: self.templates.get(tid, '') for i, tid in enumerate(local_to_tid)}
 
         # Read number of lines
         n_lines, pos = decode_varint(data, pos)
