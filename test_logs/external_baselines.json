@@ -1,0 +1,99 @@
+{
+  "_description": "Baseline compression results for external codecs (zstd, LogLite, CLP-IR). These are stable and don't need to be re-run.",
+  "_date": "2025-01-10",
+  "_notes": {
+    "zstd_3": "zstd -3 compression (fast)",
+    "zstd_19": "zstd -19 compression (best ratio)",
+    "loglite": "LogLite xorc-cli stream compression",
+    "clp_ir_3": "CLP IR format + zstd-3 compression",
+    "clp_ir_19": "CLP IR format + zstd-19 compression"
+  },
+  "linux_50mb.log": {
+    "original_size": 51693092,
+    "zstd_3": 4135293,
+    "zstd_19": 124687,
+    "loglite": 8357840,
+    "clp_ir_3": 4472044,
+    "clp_ir_19": 159059
+  },
+  "windows_50mb.log": {
+    "original_size": 52428800,
+    "zstd_3": 405159,
+    "zstd_19": 207330,
+    "loglite": 6199632,
+    "clp_ir_3": 429776,
+    "clp_ir_19": 213336
+  },
+  "thunderbird_50mb.log": {
+    "original_size": 52428800,
+    "zstd_3": 3550191,
+    "zstd_19": 2339648,
+    "loglite": 7691056,
+    "clp_ir_3": 3973871,
+    "clp_ir_19": 2607630
+  },
+  "hdfs_50mb.log": {
+    "original_size": 52428800,
+    "zstd_3": 89025,
+    "zstd_19": 47254,
+    "loglite": 18185128,
+    "clp_ir_3": 136704,
+    "clp_ir_19": 50572
+  },
+  "mac_50mb.log": {
+    "original_size": 50638656,
+    "zstd_3": 2941372,
+    "zstd_19": 1840908,
+    "loglite": 7877664,
+    "clp_ir_3": 3586794,
+    "clp_ir_19": 2148614
+  },
+  "apache_combined_50mb.log": {
+    "original_size": 52428730,
+    "zstd_3": 5428517,
+    "zstd_19": 3374006,
+    "loglite": 30275728,
+    "clp_ir_3": 6549810,
+    "clp_ir_19": 4147964
+  },
+  "nasa_50mb.log": {
+    "original_size": 52428730,
+    "zstd_3": 5428517,
+    "zstd_19": 3374006,
+    "loglite": 30275728,
+    "clp_ir_3": 6549810,
+    "clp_ir_19": 4147964
+  },
+  "nginx_json_50mb.log": {
+    "original_size": 52428800,
+    "zstd_3": 1931099,
+    "zstd_19": 1137503,
+    "loglite": 4392712,
+    "clp_ir_3": 1839383,
+    "clp_ir_19": 1410102
+  },
+  "cloudtrail_50mb.log": {
+    "original_size": 57702094,
+    "zstd_3": 5948390,
+    "zstd_19": 4987984,
+    "loglite": 14943744,
+    "clp_ir_3": 6022918,
+    "clp_ir_19": 5235467
+  },
+  "gharchive_jan_50mb.log": {
+    "original_size": 52428800,
+    "zstd_3": 4695603,
+    "zstd_19": 3114594,
+    "loglite": 47071328,
+    "clp_ir_3": 4831833,
+    "clp_ir_19": 3216651
+  },
+  "elastic_web_50mb.log": {
+    "original_size": 52549099,
+    "zstd_3": 5147089,
+    "zstd_19": 1631226,
+    "loglite": 54605424,
+    "clp_ir_3": 6007683,
+    "clp_ir_19": 1852297
+  }
+}

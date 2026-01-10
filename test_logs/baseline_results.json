@@ -1,0 +1,68 @@
+{
+  "linux_50mb.log": {
+    "original_size": 51693092,
+    "zstd": 124687,
+    "loglite": null,
+    "clp": null
+  },
+  "windows_50mb.log": {
+    "original_size": 52428800,
+    "zstd": 207330,
+    "loglite": null,
+    "clp": null
+  },
+  "thunderbird_50mb.log": {
+    "original_size": 52428800,
+    "zstd": 2339648,
+    "loglite": null,
+    "clp": null
+  },
+  "hdfs_50mb.log": {
+    "original_size": 52428800,
+    "zstd": 47254,
+    "loglite": null,
+    "clp": null
+  },
+  "mac_50mb.log": {
+    "original_size": 50638656,
+    "zstd": 1840908,
+    "loglite": null,
+    "clp": null
+  },
+  "apache_combined_50mb.log": {
+    "original_size": 52428730,
+    "zstd": 3374006,
+    "loglite": null,
+    "clp": null
+  },
+  "nasa_50mb.log": {
+    "original_size": 52428730,
+    "zstd": 3374006,
+    "loglite": null,
+    "clp": null
+  },
+  "nginx_json_50mb.log": {
+    "original_size": 52428800,
+    "zstd": 1137503,
+    "loglite": null,
+    "clp": null
+  },
+  "cloudtrail_50mb.log": {
+    "original_size": 57702094,
+    "zstd": 4987984,
+    "loglite": null,
+    "clp": null
+  },
+  "gharchive_jan_50mb.log": {
+    "original_size": 52428800,
+    "zstd": 3114594,
+    "loglite": null,
+    "clp": null
+  },
+  "elastic_web_50mb.log": {
+    "original_size": 52549099,
+    "zstd": 1631226,
+    "loglite": null,
+    "clp": null
+  }
+}
