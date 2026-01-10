@@ -1454,23 +1454,16 @@ class StreamingEncoder:
     def _encode_text_v10(self, lines: List[str]) -> bytes:
         """Encode text lines using Drain templates (V10 format).
 
-        Uses fresh miner per chunk (like batch mode) for optimal templates.
+        Uses persistent miner for cross-chunk learning. Templates improve
+        as more data is processed, leading to better compression over time.
         """
         output = io.BytesIO()
         output.write(bytes([CHUNK_V10_TEXT]))
 
-        # Create fresh miner for this chunk (like batch mode)
-        miner_config = TemplateMinerConfig()
-        miner_config.load("""
-[MASKING]
-[DRAIN]
-sim_th = 0.4
-depth = 4
-max_children = 100
-""")
-        chunk_miner = TemplateMiner(config=miner_config)
+        # Use persistent miner for cross-chunk learning
+        miner = self.drain_state.miner
 
-        # First pass: mine all templates with fresh miner
+        # First pass: mine all templates with persistent miner
         line_clusters: List[Tuple[int, str]] = []  # (cluster_id, preprocessed_line)
         for line in lines:
             if not line.strip():
@@ -1478,15 +1471,16 @@ max_children = 100
                 continue
 
             processed = self.drain_state._preprocess(line)
-            result = chunk_miner.add_log_message(processed)
+            result = miner.add_log_message(processed)
             if result:
                 line_clusters.append((result['cluster_id'], processed))
             else:
                 line_clusters.append((-1, line))
 
-        # Get FINAL templates after processing all lines
+        # Get FINAL templates after processing all lines in this chunk
+        # (templates may have evolved during processing)
         final_templates: Dict[int, str] = {}
-        for c in chunk_miner.drain.clusters:
+        for c in miner.drain.clusters:
             final_templates[c.cluster_id] = c.get_template()
 
         # Second pass: extract variables using final templates
