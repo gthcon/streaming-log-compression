@@ -68,6 +68,7 @@ COL_TS_CLF_FRAG = 3 # CLF timestamp fragment (no closing bracket)
 COL_TS_ISO = 4      # ISO timestamp delta encoding
 COL_PREFIX_ID = 5   # Prefix-ID delta encoding (e.g., "blk-123")
 COL_NUMERIC = 6     # Numeric strings as delta integers
+COL_TEXT_DELTA = 7  # Text-based delta with R prefix fallback (V4-style)
 
 # Multi-space marker for text compression
 MULTI_SPACE_PREFIX = '•'
@@ -288,100 +289,139 @@ def reconstruct_clf_fragment(seconds_val: int) -> str:
     return f"[{day:02d}/{month_name}/{year}:{h:02d}:{mi:02d}:{s:02d}"
 
 
-def analyze_column(values: List[str]) -> str:
-    """Analyze column values and return the best encoding type.
+def analyze_column(values: List[str]) -> Tuple[str, float]:
+    """Analyze column values and return (best encoding type, match ratio).
 
-    IMPORTANT: Specialized encodings (timestamp, numeric, prefix-ID) require
-    ALL values to match the pattern, because non-matching values would be
-    corrupted (e.g., parsed as 0). Dictionary encoding is used as fallback.
+    Uses 90% threshold like V4 for specialized encodings.
+    Returns match ratio so caller can decide whether to use text-delta fallback.
     """
     # Filter empty values
     present = [v for v in values if v]
     if not present:
-        return 'empty'
+        return 'empty', 1.0
+
+    n = len(present)
+    threshold = 0.9  # V4-style 90% threshold
 
     # Check for CLF timestamp fragments (e.g., '[01/Jul/1995:00:00:01' without closing bracket)
-    # MUST be 100% match to avoid data corruption
     clf_frag_count = 0
     clf_full_count = 0
     for v in present:
         if isinstance(v, str) and v.startswith('['):
-            # Try to parse as CLF
-            result, fmt = parse_clf_timestamp(v + ']')  # Add closing bracket for parsing
+            result, fmt = parse_clf_timestamp(v + ']')
             if result is not None:
                 if v.endswith(']'):
                     clf_full_count += 1
                 else:
                     clf_frag_count += 1
 
-    # Require 100% match for timestamp encoding (lossy for non-matches)
-    if clf_frag_count == len(present):
-        return 'timestamp_clf_fragment'
-    if clf_full_count == len(present):
-        return 'timestamp_clf'
+    if clf_frag_count >= n * threshold:
+        return 'timestamp_clf_fragment', clf_frag_count / n
+    if clf_full_count >= n * threshold:
+        return 'timestamp_clf', clf_full_count / n
 
-    # Check for prefix-ID pattern (e.g., "blk-123456") - must be 100% match
-    if all(isinstance(v, str) and PREFIX_ID_RE.match(v) for v in present):
-        return 'prefix_id'
+    # Check for prefix-ID pattern (e.g., "blk-123456")
+    prefix_count = sum(1 for v in present if isinstance(v, str) and PREFIX_ID_RE.match(v))
+    if prefix_count >= n * threshold:
+        prefixes = set()
+        for v in present:
+            m = PREFIX_ID_RE.match(v) if isinstance(v, str) else None
+            if m:
+                prefixes.add(m.group(1))
+        if len(prefixes) == 1:
+            return 'prefix_id', prefix_count / n
 
-    # Check for numeric strings - must be 100% match AND no leading zeros
-    # (leading zeros would be lost when converting to int and back)
+    # Check for numeric strings (safe integers without leading zeros)
     def is_safe_numeric(v):
         if not isinstance(v, str) or not NUMERIC_STRING_RE.match(v):
             return False
-        # Reject values with leading zeros (except "0" itself)
         if v.startswith('0') and len(v) > 1 and v[1] != '-':
             return False
         return True
 
-    if all(is_safe_numeric(v) for v in present):
-        return 'numeric_string'
+    numeric_count = sum(1 for v in present if is_safe_numeric(v))
+    if numeric_count >= n * threshold:
+        return 'numeric_string', numeric_count / n
 
-    # Check for URL paths (start with /) - use dictionary for these
-    if all(isinstance(v, str) and v.startswith('/') for v in present):
-        return 'path'
+    # Check for URL paths (start with /)
+    path_count = sum(1 for v in present if isinstance(v, str) and v.startswith('/'))
+    if path_count >= n * threshold:
+        return 'path', path_count / n
 
-    # Check cardinality for dictionary encoding (lossless, safe for mixed data)
-    # Dictionary encoding works best when unique values are low (<=256 fits in 1 byte index)
-    # Higher cardinality means bigger dictionary which may not compress well with zstd
+    # Check cardinality for dictionary encoding
     unique = set(values)
-    if len(unique) <= 256:  # Low cardinality - dictionary encode
-        return 'low_cardinality'
+    if len(unique) <= 256:
+        return 'low_cardinality', 1.0
 
-    return 'general'
+    return 'general', 1.0
+
+
+def escape_raw_value(v: str) -> str:
+    """Escape a raw value for text-delta encoding (V4-style)."""
+    return v.replace('\\', '\\\\').replace('\n', '\\n')
+
+
+def unescape_raw_value(v: str) -> str:
+    """Unescape a raw value from text-delta encoding."""
+    return v.replace('\\n', '\n').replace('\\\\', '\\')
 
 
 def encode_smart_column(output: io.BytesIO, values: List[str], n_rows: int) -> None:
-    """Encode a column using the best encoding strategy."""
+    """Encode a column using the best encoding strategy.
+
+    Uses V4-style text-delta encoding with R prefix fallback ONLY when match_ratio < 1.0.
+    For 100% match, uses more efficient binary encoding (original behavior).
+    """
     if not values:
         output.write(bytes([COL_RAW]))
         output.write(encode_varint(0))
         return
 
-    col_type = analyze_column(values)
+    col_type, match_ratio = analyze_column(values)
+    use_text_delta = match_ratio < 1.0  # Use text-delta only when we have outliers
 
     # Timestamp CLF fragment encoding
     if col_type == 'timestamp_clf_fragment':
-        output.write(bytes([COL_TS_CLF_FRAG]))
-        encode_timestamp_fragment_column(output, values)
+        if use_text_delta:
+            output.write(bytes([COL_TEXT_DELTA]))
+            output.write(bytes([COL_TS_CLF_FRAG]))
+            encode_timestamp_fragment_text_delta(output, values)
+        else:
+            output.write(bytes([COL_TS_CLF_FRAG]))
+            encode_timestamp_fragment_column(output, values)
         return
 
     # Timestamp CLF full encoding
     if col_type == 'timestamp_clf':
-        output.write(bytes([COL_TS_CLF]))
-        encode_timestamp_clf_column(output, values)
+        if use_text_delta:
+            output.write(bytes([COL_TEXT_DELTA]))
+            output.write(bytes([COL_TS_CLF]))
+            encode_timestamp_clf_text_delta(output, values)
+        else:
+            output.write(bytes([COL_TS_CLF]))
+            encode_timestamp_clf_column(output, values)
         return
 
     # Prefix-ID delta encoding
     if col_type == 'prefix_id':
-        output.write(bytes([COL_PREFIX_ID]))
-        encode_prefix_id_column(output, values)
+        if use_text_delta:
+            output.write(bytes([COL_TEXT_DELTA]))
+            output.write(bytes([COL_PREFIX_ID]))
+            encode_prefix_id_text_delta(output, values)
+        else:
+            output.write(bytes([COL_PREFIX_ID]))
+            encode_prefix_id_column(output, values)
         return
 
     # Numeric string encoding
     if col_type == 'numeric_string':
-        output.write(bytes([COL_NUMERIC]))
-        encode_numeric_column(output, values)
+        if use_text_delta:
+            output.write(bytes([COL_TEXT_DELTA]))
+            output.write(bytes([COL_NUMERIC]))
+            encode_numeric_text_delta(output, values)
+        else:
+            output.write(bytes([COL_NUMERIC]))
+            encode_numeric_column(output, values)
         return
 
     # Dictionary encoding for low cardinality or paths
@@ -390,7 +430,7 @@ def encode_smart_column(output: io.BytesIO, values: List[str], n_rows: int) -> N
         encode_dict_column(output, values)
         return
 
-    # Default: raw newline-separated
+    # Default: raw newline-separated (no escaping needed since no R prefix)
     output.write(bytes([COL_RAW]))
     col_data = '\n'.join(values).encode('utf-8')
     output.write(encode_varint(len(col_data)))
@@ -504,6 +544,135 @@ def encode_dict_column(output: io.BytesIO, values: List[str]) -> None:
     output.write(packed)
 
 
+# ============================================================================
+# V4-style Text-Delta Encoding with R Prefix Fallback
+# ============================================================================
+
+def encode_timestamp_fragment_text_delta(output: io.BytesIO, values: List[str]) -> None:
+    """Encode CLF timestamp fragments using text-delta with R prefix fallback."""
+    deltas = []
+    prev = 0
+
+    for v in values:
+        if isinstance(v, str) and v.startswith('['):
+            result, _ = parse_clf_timestamp(v + ']')
+            if result is not None:
+                deltas.append(str(result - prev))
+                prev = result
+            else:
+                deltas.append('R' + escape_raw_value(v))
+        else:
+            deltas.append('R' + escape_raw_value(v))
+
+    delta_text = '\n'.join(deltas)
+    delta_bytes = delta_text.encode('utf-8')
+    output.write(encode_varint(len(delta_bytes)))
+    output.write(delta_bytes)
+
+
+def encode_timestamp_clf_text_delta(output: io.BytesIO, values: List[str]) -> None:
+    """Encode full CLF timestamps using text-delta with R prefix fallback."""
+    # Collect format variations
+    format_set = set()
+    parsed = []
+
+    for v in values:
+        result, fmt = parse_clf_timestamp(v) if isinstance(v, str) else (None, None)
+        if result is not None:
+            fmt_key = (fmt.get('tz', ''), fmt.get('has_brackets', True), fmt.get('has_close', True))
+            format_set.add(fmt_key)
+            parsed.append((result, fmt_key))
+        else:
+            parsed.append((None, v))
+
+    # Write format dictionary
+    format_list = sorted(format_set)
+    fmt_to_id = {f: i for i, f in enumerate(format_list)}
+    output.write(encode_varint(len(format_list)))
+    for fmt in format_list:
+        tz_bytes = fmt[0].encode('utf-8')
+        output.write(encode_varint(len(tz_bytes)))
+        output.write(tz_bytes)
+        output.write(bytes([1 if fmt[1] else 0]))
+        output.write(bytes([1 if fmt[2] else 0]))
+
+    # Write deltas and format indices
+    deltas = []
+    fmt_indices = []
+    prev = 0
+
+    for result, fmt_or_raw in parsed:
+        if result is not None:
+            deltas.append(str(result - prev))
+            prev = result
+            fmt_indices.append(str(fmt_to_id[fmt_or_raw]))
+        else:
+            deltas.append('R' + escape_raw_value(fmt_or_raw))
+            fmt_indices.append('0')
+
+    delta_text = '\n'.join(deltas)
+    output.write(encode_varint(len(delta_text.encode('utf-8'))))
+    output.write(delta_text.encode('utf-8'))
+
+    fmt_text = '\n'.join(fmt_indices)
+    output.write(encode_varint(len(fmt_text.encode('utf-8'))))
+    output.write(fmt_text.encode('utf-8'))
+
+
+def encode_prefix_id_text_delta(output: io.BytesIO, values: List[str]) -> None:
+    """Encode prefix-ID values using text-delta with R prefix fallback."""
+    prefix = None
+    for v in values:
+        m = PREFIX_ID_RE.match(v) if isinstance(v, str) else None
+        if m:
+            prefix = m.group(1)
+            break
+
+    prefix_bytes = (prefix or '').encode('utf-8')
+    output.write(encode_varint(len(prefix_bytes)))
+    output.write(prefix_bytes)
+
+    deltas = []
+    prev = 0
+
+    for v in values:
+        m = PREFIX_ID_RE.match(v) if isinstance(v, str) else None
+        if m and m.group(1) == prefix:
+            num = int(m.group(2))
+            deltas.append(str(num - prev))
+            prev = num
+        else:
+            deltas.append('R' + escape_raw_value(v))
+
+    delta_text = '\n'.join(deltas)
+    output.write(encode_varint(len(delta_text.encode('utf-8'))))
+    output.write(delta_text.encode('utf-8'))
+
+
+def encode_numeric_text_delta(output: io.BytesIO, values: List[str]) -> None:
+    """Encode numeric strings using text-delta with R prefix fallback."""
+    deltas = []
+    prev = 0
+
+    for v in values:
+        if isinstance(v, str) and NUMERIC_STRING_RE.match(v):
+            if v.startswith('0') and len(v) > 1 and v[1] != '-':
+                deltas.append('R' + escape_raw_value(v))
+            else:
+                try:
+                    num = int(v)
+                    deltas.append(str(num - prev))
+                    prev = num
+                except ValueError:
+                    deltas.append('R' + escape_raw_value(v))
+        else:
+            deltas.append('R' + escape_raw_value(v))
+
+    delta_text = '\n'.join(deltas)
+    output.write(encode_varint(len(delta_text.encode('utf-8'))))
+    output.write(delta_text.encode('utf-8'))
+
+
 def pack_bits_simple(values: List[int], bits_per_value: int) -> bytes:
     """Simple bit-packing implementation."""
     if not values or bits_per_value == 0:
@@ -563,6 +732,12 @@ def decode_smart_column(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], 
         pos += col_len
         return col_data.split('\n'), pos
 
+    if enc_type == COL_TEXT_DELTA:
+        # V4-style text-delta with R prefix fallback
+        sub_type = data[pos]
+        pos += 1
+        return decode_text_delta_column(data, pos, n_rows, sub_type)
+
     if enc_type == COL_TS_CLF_FRAG:
         return decode_timestamp_fragment_column(data, pos, n_rows)
 
@@ -580,6 +755,126 @@ def decode_smart_column(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], 
 
     # Fallback - shouldn't happen
     return [''] * n_rows, pos
+
+
+def decode_text_delta_column(data: bytes, pos: int, n_rows: int, sub_type: int) -> Tuple[List[str], int]:
+    """Decode V4-style text-delta encoded column."""
+    if sub_type == COL_TS_CLF_FRAG:
+        return decode_timestamp_fragment_text_delta(data, pos, n_rows)
+    elif sub_type == COL_TS_CLF:
+        return decode_timestamp_clf_text_delta(data, pos, n_rows)
+    elif sub_type == COL_PREFIX_ID:
+        return decode_prefix_id_text_delta(data, pos, n_rows)
+    elif sub_type == COL_NUMERIC:
+        return decode_numeric_text_delta(data, pos, n_rows)
+    else:
+        return [''] * n_rows, pos
+
+
+def decode_timestamp_fragment_text_delta(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode CLF timestamp fragment text-delta column."""
+    delta_len, pos = decode_varint(data, pos)
+    delta_text = data[pos:pos+delta_len].decode('utf-8')
+    pos += delta_len
+
+    deltas = delta_text.split('\n')
+    values = []
+    current = 0
+
+    for d in deltas:
+        if d.startswith('R'):
+            values.append(unescape_raw_value(d[1:]))
+        else:
+            current += int(d)
+            values.append(reconstruct_clf_fragment(current))
+
+    return values, pos
+
+
+def decode_timestamp_clf_text_delta(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode full CLF timestamp text-delta column."""
+    # Read format dictionary
+    n_formats, pos = decode_varint(data, pos)
+    format_list = []
+    for _ in range(n_formats):
+        tz_len, pos = decode_varint(data, pos)
+        tz = data[pos:pos+tz_len].decode('utf-8')
+        pos += tz_len
+        has_brackets = data[pos] == 1
+        pos += 1
+        has_close = data[pos] == 1
+        pos += 1
+        format_list.append({'tz': tz, 'has_brackets': has_brackets, 'has_close': has_close})
+
+    # Read deltas
+    delta_len, pos = decode_varint(data, pos)
+    delta_text = data[pos:pos+delta_len].decode('utf-8')
+    pos += delta_len
+    deltas = delta_text.split('\n')
+
+    # Read format indices
+    fmt_len, pos = decode_varint(data, pos)
+    fmt_text = data[pos:pos+fmt_len].decode('utf-8')
+    pos += fmt_len
+    fmt_indices = [int(x) for x in fmt_text.split('\n')]
+
+    values = []
+    current = 0
+
+    for i, d in enumerate(deltas):
+        if d.startswith('R'):
+            values.append(unescape_raw_value(d[1:]))
+        else:
+            current += int(d)
+            fmt_idx = fmt_indices[i] if i < len(fmt_indices) else 0
+            fmt = format_list[fmt_idx] if fmt_idx < len(format_list) else {}
+            values.append(reconstruct_clf_timestamp(current, fmt))
+
+    return values, pos
+
+
+def decode_prefix_id_text_delta(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode prefix-ID text-delta column."""
+    prefix_len, pos = decode_varint(data, pos)
+    prefix = data[pos:pos+prefix_len].decode('utf-8')
+    pos += prefix_len
+
+    delta_len, pos = decode_varint(data, pos)
+    delta_text = data[pos:pos+delta_len].decode('utf-8')
+    pos += delta_len
+
+    deltas = delta_text.split('\n')
+    values = []
+    current = 0
+
+    for d in deltas:
+        if d.startswith('R'):
+            values.append(unescape_raw_value(d[1:]))
+        else:
+            current += int(d)
+            values.append(f"{prefix}-{current}" if prefix else str(current))
+
+    return values, pos
+
+
+def decode_numeric_text_delta(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode numeric text-delta column."""
+    delta_len, pos = decode_varint(data, pos)
+    delta_text = data[pos:pos+delta_len].decode('utf-8')
+    pos += delta_len
+
+    deltas = delta_text.split('\n')
+    values = []
+    current = 0
+
+    for d in deltas:
+        if d.startswith('R'):
+            values.append(unescape_raw_value(d[1:]))
+        else:
+            current += int(d)
+            values.append(str(current))
+
+    return values, pos
 
 
 def decode_timestamp_fragment_column(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
@@ -1273,6 +1568,12 @@ class StreamingEncoder:
         """Encode JSON lines in columnar format."""
         output = io.BytesIO()
 
+        # Detect JSON formatting style from first line
+        # 0 = compact (no spaces), 1 = spaced (": " and ", ")
+        json_style = 0
+        if lines and '": "' in lines[0] or '": ' in lines[0]:
+            json_style = 1
+
         # Parse all lines
         objects = []
         row_keys = []  # Per-row key order
@@ -1295,6 +1596,9 @@ class StreamingEncoder:
         # Sort keys for consistent ordering
         sorted_keys = sorted(all_keys)
         key_to_idx = {k: i for i, k in enumerate(sorted_keys)}
+
+        # Write JSON style (0=compact, 1=spaced)
+        output.write(bytes([json_style]))
 
         # Write number of keys
         output.write(encode_varint(len(sorted_keys)))
@@ -1778,6 +2082,10 @@ class StreamingDecoder:
         """Decode columnar JSON."""
         pos = 0
 
+        # Read JSON style (0=compact, 1=spaced)
+        json_style = data[pos]
+        pos += 1
+
         # Read keys
         n_keys, pos = decode_varint(data, pos)
         keys = []
@@ -1804,6 +2112,12 @@ class StreamingDecoder:
             columns[key] = values
 
         # Reconstruct objects with original key order
+        # Use appropriate separators based on json_style
+        if json_style == 1:
+            separators = (', ', ': ')  # Spaced style
+        else:
+            separators = (',', ':')  # Compact style
+
         lines = []
         for i in range(n_lines):
             obj = {}
@@ -1817,7 +2131,7 @@ class StreamingDecoder:
                     except json.JSONDecodeError:
                         obj[key] = val_str
 
-            lines.append(json.dumps(obj, separators=(',', ':'), ensure_ascii=False))
+            lines.append(json.dumps(obj, separators=separators, ensure_ascii=False))
 
         return lines
 
