@@ -1498,6 +1498,11 @@ def is_json_line(line: str) -> bool:
             if inner[0] not in ('"', "'", '[', '{', 't', 'f', 'n', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'):
                 return False
 
+    # Check for unicode escapes - these get normalized by json.loads/dumps
+    # which breaks lossless roundtrip. Treat as TEXT to preserve exact encoding.
+    if '\\u' in stripped:
+        return False
+
     # Try actual JSON parsing (not too expensive for short lines)
     # Only do this for lines that pass heuristics
     try:
