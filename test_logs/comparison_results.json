@@ -10,7 +10,12 @@
     "v10_zstd_19": 157477,
     "v10_fast": 189975,
     "v10_streaming": 457171,
-    "v10_streaming_smart": 525852
+    "v10_streaming_smart": 525852,
+    "v10_streaming_current": 457171,
+    "v10_streaming_new": 409285,
+    "v10_streaming_optimized": 215949,
+    "v10_streaming_xchunk": 466648,
+    "v10_streaming_final": 299157
   },
   "windows_50mb.log": {
     "original_size": 52428800,
@@ -23,7 +28,11 @@
     "v10_zstd_19": 128942,
     "v10_fast": 178247,
     "v10_streaming": 249770,
-    "v10_streaming_smart": 252431
+    "v10_streaming_smart": 252431,
+    "v10_streaming_current": 249770,
+    "v10_streaming_new": 225013,
+    "v10_streaming_optimized": 219267,
+    "v10_streaming_final": 293167
   },
   "thunderbird_50mb.log": {
     "original_size": 52428800,
@@ -36,7 +45,11 @@
     "v10_zstd_19": 2230812,
     "v10_fast": 3115727,
     "v10_streaming": 3606449,
-    "v10_streaming_smart": 3375404
+    "v10_streaming_smart": 3375404,
+    "v10_streaming_current": 3606449,
+    "v10_streaming_new": 3514459,
+    "v10_streaming_optimized": 3558338,
+    "v10_streaming_final": 3551349
   },
   "hdfs_50mb.log": {
     "original_size": 52428800,
@@ -49,7 +62,11 @@
     "v10_zstd_19": 53542,
     "v10_fast": 59324,
     "v10_streaming": 54341,
-    "v10_streaming_smart": 54351
+    "v10_streaming_smart": 54351,
+    "v10_streaming_current": 54341,
+    "v10_streaming_new": 53604,
+    "v10_streaming_optimized": 52767,
+    "v10_streaming_final": 60348
   },
   "mac_50mb.log": {
     "original_size": 50638656,
@@ -62,7 +79,11 @@
     "v10_zstd_19": 815616,
     "v10_fast": 968746,
     "v10_streaming": 1621286,
-    "v10_streaming_smart": 2569294
+    "v10_streaming_smart": 2569294,
+    "v10_streaming_current": 1621286,
+    "v10_streaming_new": 1260464,
+    "v10_streaming_optimized": 1132217,
+    "v10_streaming_final": 1081019
   },
   "apache_combined_50mb.log": {
     "original_size": 52428730,
@@ -75,7 +96,12 @@
     "v10_zstd_19": 2111780,
     "v10_fast": 2590003,
     "v10_streaming": 4842900,
-    "v10_streaming_smart": 4903550
+    "v10_streaming_smart": 4903550,
+    "v10_streaming_current": 4842900,
+    "v10_streaming_new": 4531673,
+    "v10_streaming_optimized": 4385115,
+    "v10_streaming_xchunk": 3510225,
+    "v10_streaming_final": 4036651
   },
   "nasa_50mb.log": {
     "original_size": 52428730,
@@ -86,7 +112,10 @@
     "clp_ir_19": 4147964,
     "v10_zstd_3": 2603073,
     "v10_zstd_19": 2111780,
-    "v10_fast": 2590003
+    "v10_fast": 2590003,
+    "v10_streaming_current": 4842900,
+    "v10_streaming_new": 4531673,
+    "v10_streaming_optimized": 4385115
   },
   "nginx_json_50mb.log": {
     "original_size": 52428800,
@@ -99,7 +128,12 @@
     "v10_zstd_19": 239329,
     "v10_fast": 327063,
     "v10_streaming": 683890,
-    "v10_streaming_smart": 683888
+    "v10_streaming_smart": 683888,
+    "v10_streaming_current": 683890,
+    "v10_streaming_new": 420922,
+    "v10_streaming_optimized": 351513,
+    "v10_streaming_xchunk": 351513,
+    "v10_streaming_final": 934438
   },
   "cloudtrail_50mb.log": {
     "original_size": 57702094,
@@ -112,7 +146,10 @@
     "v10_zstd_19": 4275912,
     "v10_fast": 4473089,
     "v10_streaming": 5015892,
-    "v10_streaming_smart": 5015892
+    "v10_streaming_smart": 5015892,
+    "v10_streaming_current": 5015892,
+    "v10_streaming_new": 4959801,
+    "v10_streaming_optimized": 4923937
   },
   "gharchive_jan_50mb.log": {
     "original_size": 52428800,
@@ -125,7 +162,10 @@
     "v10_zstd_19": 3114679,
     "v10_fast": 3774125,
     "v10_streaming": 4161098,
-    "v10_streaming_smart": 4161094
+    "v10_streaming_smart": 4161094,
+    "v10_streaming_current": 4161098,
+    "v10_streaming_new": 3761499,
+    "v10_streaming_optimized": 3761735
   },
   "elastic_web_50mb.log": {
     "original_size": 52549099,
@@ -138,6 +178,17 @@
     "v10_zstd_19": 1302792,
     "v10_fast": 1664970,
     "v10_streaming": 1971959,
-    "v10_streaming_smart": 1971959
+    "v10_streaming_smart": 1971959,
+    "v10_streaming_current": 1971959,
+    "v10_streaming_new": 1857030,
+    "v10_streaming_optimized": 1856601
+  },
+  "gharchive_50mb.log": {
+    "original_size": 50613401,
+    "zstd_3": 4979561,
+    "zstd_19": 3485125,
+    "v10_streaming_current": 4584598,
+    "v10_streaming_new": 4215812,
+    "v10_streaming_optimized": 4216085
   }
 }

@@ -69,6 +69,9 @@ COL_TS_ISO = 4      # ISO timestamp delta encoding
 COL_PREFIX_ID = 5   # Prefix-ID delta encoding (e.g., "blk-123")
 COL_NUMERIC = 6     # Numeric strings as delta integers
 COL_TEXT_DELTA = 7  # Text-based delta with R prefix fallback (V4-style)
+COL_IPV4 = 8        # IPv4 address delta encoding
+COL_PATH = 9        # URL path segment encoding
+COL_XCHUNK_DICT = 10  # Cross-chunk dictionary (references global dict)
 
 # Multi-space marker for text compression
 MULTI_SPACE_PREFIX = '•'
@@ -82,6 +85,8 @@ CLF_TIMESTAMP_RE = re.compile(
 )
 PREFIX_ID_RE = re.compile(r'^"?([a-zA-Z][\w-]*)-(\d+)"?,?$')
 NUMERIC_STRING_RE = re.compile(r'^-?\d+$')
+IPV4_RE = re.compile(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$')
+PATH_RE = re.compile(r'^/[\w./-]*$')  # URL paths starting with /
 
 MONTHS = {'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,
           'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12}
@@ -97,6 +102,14 @@ class StreamingConfig:
     # Chunk sizes
     chunk_size: int = 10000  # Lines per chunk
     initial_chunk_size: int = 1000  # Smaller first chunk for faster startup
+    min_chunk_size: int = 500  # Minimum chunk size for adaptive sizing
+    max_chunk_size: int = 50000  # Maximum chunk size for adaptive sizing
+
+    # Adaptive chunk sizing (disabled by default - experimental)
+    adaptive_chunks: bool = False  # Enable adaptive chunk sizing
+    target_ratio: float = 0.10  # Target compression ratio (10%)
+    ratio_good_threshold: float = 0.10  # Increase chunk size if below this (very good)
+    ratio_bad_threshold: float = 0.30  # Decrease chunk size if above this
 
     # zstd settings
     zstd_level: int = 3
@@ -289,6 +302,101 @@ def reconstruct_clf_fragment(seconds_val: int) -> str:
     return f"[{day:02d}/{month_name}/{year}:{h:02d}:{mi:02d}:{s:02d}"
 
 
+def parse_iso_timestamp(ts: str) -> Optional[Tuple[int, dict]]:
+    """Parse ISO timestamp and return (milliseconds, format_info) or None."""
+    m = ISO_TIMESTAMP_RE.match(ts)
+    if not m:
+        return None
+
+    year, mon, day, h, mi, s, ms_part, tz = m.groups()
+    y, mo, d = int(year), int(mon), int(day)
+    hr, mn, sc = int(h), int(mi), int(s)
+
+    # Calculate milliseconds from epoch (approximate)
+    days = (y - 1970) * 365 + (y - 1969) // 4 + (mo - 1) * 30 + d
+    ms_val = days * 86400000 + hr * 3600000 + mn * 60000 + sc * 1000
+    if ms_part:
+        ms_val += int(float(ms_part) * 1000)
+
+    format_info = {
+        'has_quote': ts.startswith('"'),
+        'has_comma': ts.endswith(','),
+        'ms_digits': len(ms_part) - 1 if ms_part else 0,
+        'tz': tz or '',
+        'separator': 'T' if 'T' in ts else ' '
+    }
+
+    return ms_val, format_info
+
+
+def reconstruct_iso_timestamp(ms_val: int, format_info: dict) -> str:
+    """Reconstruct ISO timestamp from milliseconds and format info."""
+    days = ms_val // 86400000
+    rem = ms_val % 86400000
+    h = rem // 3600000
+    rem = rem % 3600000
+    mi = rem // 60000
+    rem = rem % 60000
+    s = rem // 1000
+    ms = rem % 1000
+
+    # Approximate year/month/day
+    year = 1970 + days // 365
+    day_of_year = days - (year - 1970) * 365 - (year - 1969) // 4
+
+    while day_of_year < 0:
+        year -= 1
+        day_of_year = days - (year - 1970) * 365 - (year - 1969) // 4
+
+    month = day_of_year // 30 + 1
+    if month > 12:
+        month = 12
+    day = day_of_year - (month - 1) * 30
+    if day <= 0:
+        month -= 1
+        if month <= 0:
+            month = 12
+            year -= 1
+        day = day_of_year - (month - 1) * 30
+    if day <= 0:
+        day = 1
+
+    sep = format_info.get('separator', 'T')
+    result = f"{year:04d}-{month:02d}-{day:02d}{sep}{h:02d}:{mi:02d}:{s:02d}"
+
+    ms_digits = format_info.get('ms_digits', 0)
+    if ms_digits > 0:
+        ms_str = f"{ms:03d}"[:ms_digits]
+        result += f".{ms_str}"
+
+    tz = format_info.get('tz', '')
+    if tz:
+        result += tz
+
+    if format_info.get('has_quote'):
+        result = '"' + result + '"'
+    if format_info.get('has_comma'):
+        result += ','
+
+    return result
+
+
+def parse_ipv4(ip: str) -> Optional[int]:
+    """Parse IPv4 address to 32-bit integer."""
+    m = IPV4_RE.match(ip)
+    if not m:
+        return None
+    parts = [int(x) for x in m.groups()]
+    if any(p > 255 for p in parts):
+        return None
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+
+
+def reconstruct_ipv4(val: int) -> str:
+    """Reconstruct IPv4 address from 32-bit integer."""
+    return f"{(val >> 24) & 0xFF}.{(val >> 16) & 0xFF}.{(val >> 8) & 0xFF}.{val & 0xFF}"
+
+
 def analyze_column(values: List[str]) -> Tuple[str, float]:
     """Analyze column values and return (best encoding type, match ratio).
 
@@ -320,6 +428,16 @@ def analyze_column(values: List[str]) -> Tuple[str, float]:
     if clf_full_count >= n * threshold:
         return 'timestamp_clf', clf_full_count / n
 
+    # Check for ISO timestamps (e.g., "2024-01-15T10:30:00Z")
+    iso_count = sum(1 for v in present if isinstance(v, str) and parse_iso_timestamp(v) is not None)
+    if iso_count >= n * threshold:
+        return 'timestamp_iso', iso_count / n
+
+    # Check for IPv4 addresses
+    ipv4_count = sum(1 for v in present if isinstance(v, str) and parse_ipv4(v) is not None)
+    if ipv4_count >= n * threshold:
+        return 'ipv4', ipv4_count / n
+
     # Check for prefix-ID pattern (e.g., "blk-123456")
     prefix_count = sum(1 for v in present if isinstance(v, str) and PREFIX_ID_RE.match(v))
     if prefix_count >= n * threshold:
@@ -343,10 +461,10 @@ def analyze_column(values: List[str]) -> Tuple[str, float]:
     if numeric_count >= n * threshold:
         return 'numeric_string', numeric_count / n
 
-    # Check for URL paths (start with /)
+    # Check for URL paths (start with /) - use specialized path encoding
     path_count = sum(1 for v in present if isinstance(v, str) and v.startswith('/'))
     if path_count >= n * threshold:
-        return 'path', path_count / n
+        return 'url_path', path_count / n
 
     # Check cardinality for dictionary encoding
     unique = set(values)
@@ -424,8 +542,32 @@ def encode_smart_column(output: io.BytesIO, values: List[str], n_rows: int) -> N
             encode_numeric_column(output, values)
         return
 
-    # Dictionary encoding for low cardinality or paths
-    if col_type == 'low_cardinality' or col_type == 'path':
+    # NOTE: ISO timestamp, IPv4, and URL path encodings are implemented but disabled
+    # by default because they add overhead without consistent compression benefit.
+    # The specialized encodings work well when data is highly repetitive (like paths
+    # sharing common segments), but hurt compression when zstd's LZ77 can handle
+    # the patterns better. These can be enabled via config flags if needed.
+
+    # ISO timestamp encoding (disabled)
+    # if col_type == 'timestamp_iso':
+    #     output.write(bytes([COL_TS_ISO]))
+    #     encode_iso_timestamp_column(output, values)
+    #     return
+
+    # IPv4 address encoding (disabled)
+    # if col_type == 'ipv4':
+    #     output.write(bytes([COL_IPV4]))
+    #     encode_ipv4_column(output, values)
+    #     return
+
+    # URL path encoding (disabled - falls through to dictionary encoding)
+    # if col_type == 'url_path':
+    #     output.write(bytes([COL_PATH]))
+    #     encode_path_column(output, values)
+    #     return
+
+    # Dictionary encoding for low cardinality (and disabled types like url_path, ipv4, timestamp_iso)
+    if col_type in ('low_cardinality', 'url_path', 'ipv4', 'timestamp_iso'):
         output.write(bytes([COL_DICT]))
         encode_dict_column(output, values)
         return
@@ -673,6 +815,199 @@ def encode_numeric_text_delta(output: io.BytesIO, values: List[str]) -> None:
     output.write(delta_text.encode('utf-8'))
 
 
+# ============================================================================
+# ISO Timestamp Encoding
+# ============================================================================
+
+def encode_iso_timestamp_column(output: io.BytesIO, values: List[str]) -> None:
+    """Encode ISO timestamps using delta encoding."""
+    ms_values = []
+    formats = []
+
+    for v in values:
+        result = parse_iso_timestamp(v) if isinstance(v, str) else None
+        if result is not None:
+            ms_val, fmt = result
+            ms_values.append(ms_val)
+            formats.append(fmt)
+        else:
+            ms_values.append(0)
+            formats.append({})
+
+    # Frame-of-reference encoding
+    min_val = min(ms_values) if ms_values else 0
+    output.write(encode_varint(min_val))
+
+    # Delta encode from minimum
+    for val in ms_values:
+        output.write(encode_varint(val - min_val))
+
+    # Store common format (most formats are the same)
+    from collections import Counter
+    format_strs = [json.dumps(f, sort_keys=True) for f in formats]
+    common_format = Counter(format_strs).most_common(1)[0][0] if format_strs else '{}'
+    format_bytes = common_format.encode('utf-8')
+    output.write(encode_varint(len(format_bytes)))
+    output.write(format_bytes)
+
+
+def encode_iso_timestamp_text_delta(output: io.BytesIO, values: List[str]) -> None:
+    """Encode ISO timestamps using text-delta with R prefix fallback."""
+    # Collect format variations
+    format_set = set()
+    parsed = []
+
+    for v in values:
+        result = parse_iso_timestamp(v) if isinstance(v, str) else None
+        if result is not None:
+            ms_val, fmt = result
+            fmt_key = (fmt.get('has_quote', False), fmt.get('has_comma', False),
+                       fmt.get('ms_digits', 0), fmt.get('tz', ''), fmt.get('separator', 'T'))
+            format_set.add(fmt_key)
+            parsed.append((ms_val, fmt_key))
+        else:
+            parsed.append((None, v))
+
+    # Write format dictionary
+    format_list = sorted(format_set)
+    fmt_to_id = {f: i for i, f in enumerate(format_list)}
+    output.write(encode_varint(len(format_list)))
+    for fmt in format_list:
+        output.write(bytes([1 if fmt[0] else 0]))  # has_quote
+        output.write(bytes([1 if fmt[1] else 0]))  # has_comma
+        output.write(bytes([fmt[2]]))  # ms_digits
+        tz_bytes = fmt[3].encode('utf-8')
+        output.write(encode_varint(len(tz_bytes)))
+        output.write(tz_bytes)
+        sep_bytes = fmt[4].encode('utf-8')
+        output.write(encode_varint(len(sep_bytes)))
+        output.write(sep_bytes)
+
+    # Write deltas and format indices
+    deltas = []
+    fmt_indices = []
+    prev = 0
+
+    for result, fmt_or_raw in parsed:
+        if result is not None:
+            deltas.append(str(result - prev))
+            prev = result
+            fmt_indices.append(str(fmt_to_id[fmt_or_raw]))
+        else:
+            deltas.append('R' + escape_raw_value(fmt_or_raw))
+            fmt_indices.append('0')
+
+    delta_text = '\n'.join(deltas)
+    output.write(encode_varint(len(delta_text.encode('utf-8'))))
+    output.write(delta_text.encode('utf-8'))
+
+    fmt_text = '\n'.join(fmt_indices)
+    output.write(encode_varint(len(fmt_text.encode('utf-8'))))
+    output.write(fmt_text.encode('utf-8'))
+
+
+# ============================================================================
+# IPv4 Address Encoding
+# ============================================================================
+
+def encode_ipv4_column(output: io.BytesIO, values: List[str]) -> None:
+    """Encode IPv4 addresses as 32-bit integers with delta encoding."""
+    int_values = []
+    for v in values:
+        ip_int = parse_ipv4(v) if isinstance(v, str) else None
+        int_values.append(ip_int if ip_int is not None else 0)
+
+    # Frame-of-reference encoding
+    min_val = min(int_values) if int_values else 0
+    output.write(encode_varint(min_val))
+
+    # Delta encode from minimum
+    for val in int_values:
+        output.write(encode_varint(val - min_val))
+
+
+def encode_ipv4_text_delta(output: io.BytesIO, values: List[str]) -> None:
+    """Encode IPv4 addresses using text-delta with R prefix fallback."""
+    deltas = []
+    prev = 0
+
+    for v in values:
+        ip_int = parse_ipv4(v) if isinstance(v, str) else None
+        if ip_int is not None:
+            deltas.append(str(ip_int - prev))
+            prev = ip_int
+        else:
+            deltas.append('R' + escape_raw_value(v))
+
+    delta_text = '\n'.join(deltas)
+    output.write(encode_varint(len(delta_text.encode('utf-8'))))
+    output.write(delta_text.encode('utf-8'))
+
+
+# ============================================================================
+# URL Path Encoding (with segment dictionary)
+# ============================================================================
+
+def encode_path_column(output: io.BytesIO, values: List[str]) -> None:
+    """Encode URL paths using segment-based dictionary compression.
+
+    Paths like /api/v1/users/123 and /api/v1/posts/456 share common segments.
+    Non-path values are stored in a separate raw dictionary.
+    """
+    # Build segment dictionary from all paths
+    segment_dict = {}
+    next_segment_id = 0
+
+    # Also build dictionary for non-path values
+    raw_dict = {}
+    next_raw_id = 0
+
+    path_segments = []
+    for v in values:
+        if isinstance(v, str) and v.startswith('/'):
+            segments = v.split('/')
+            path_segments.append(('path', segments))
+            for seg in segments:
+                if seg and seg not in segment_dict:
+                    segment_dict[seg] = next_segment_id
+                    next_segment_id += 1
+        else:
+            # Non-path value - store in raw dictionary
+            path_segments.append(('raw', v))
+            if v not in raw_dict:
+                raw_dict[v] = next_raw_id
+                next_raw_id += 1
+
+    # Write segment dictionary
+    sorted_segments = sorted(segment_dict.items(), key=lambda x: x[1])
+    output.write(encode_varint(len(sorted_segments)))
+    for seg, _ in sorted_segments:
+        seg_bytes = seg.encode('utf-8')
+        output.write(encode_varint(len(seg_bytes)))
+        output.write(seg_bytes)
+
+    # Write raw value dictionary
+    sorted_raw = sorted(raw_dict.items(), key=lambda x: x[1])
+    output.write(encode_varint(len(sorted_raw)))
+    for val, _ in sorted_raw:
+        val_bytes = val.encode('utf-8') if isinstance(val, str) else b''
+        output.write(encode_varint(len(val_bytes)))
+        output.write(val_bytes)
+
+    # Write paths as segment indices
+    for ptype, data in path_segments:
+        if ptype == 'raw':
+            output.write(encode_varint(0xFFFF))  # Raw marker
+            output.write(encode_varint(raw_dict.get(data, 0)))
+        else:
+            output.write(encode_varint(len(data)))
+            for seg in data:
+                if seg:
+                    output.write(encode_varint(segment_dict.get(seg, 0)))
+                else:
+                    output.write(encode_varint(0xFFFE))  # Empty segment marker
+
+
 def pack_bits_simple(values: List[int], bits_per_value: int) -> bytes:
     """Simple bit-packing implementation."""
     if not values or bits_per_value == 0:
@@ -753,6 +1088,15 @@ def decode_smart_column(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], 
     if enc_type == COL_DICT:
         return decode_dict_column_smart(data, pos, n_rows)
 
+    if enc_type == COL_TS_ISO:
+        return decode_iso_timestamp_column(data, pos, n_rows)
+
+    if enc_type == COL_IPV4:
+        return decode_ipv4_column(data, pos, n_rows)
+
+    if enc_type == COL_PATH:
+        return decode_path_column(data, pos, n_rows)
+
     # Fallback - shouldn't happen
     return [''] * n_rows, pos
 
@@ -767,6 +1111,10 @@ def decode_text_delta_column(data: bytes, pos: int, n_rows: int, sub_type: int) 
         return decode_prefix_id_text_delta(data, pos, n_rows)
     elif sub_type == COL_NUMERIC:
         return decode_numeric_text_delta(data, pos, n_rows)
+    elif sub_type == COL_TS_ISO:
+        return decode_iso_timestamp_text_delta(data, pos, n_rows)
+    elif sub_type == COL_IPV4:
+        return decode_ipv4_text_delta(data, pos, n_rows)
     else:
         return [''] * n_rows, pos
 
@@ -957,6 +1305,167 @@ def decode_dict_column_smart(data: bytes, pos: int, n_rows: int) -> Tuple[List[s
 
 
 # ============================================================================
+# ISO Timestamp Decoding
+# ============================================================================
+
+def decode_iso_timestamp_column(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode ISO timestamp column."""
+    min_val, pos = decode_varint(data, pos)
+
+    ms_values = []
+    for _ in range(n_rows):
+        offset, pos = decode_varint(data, pos)
+        ms_values.append(min_val + offset)
+
+    # Read format info
+    format_len, pos = decode_varint(data, pos)
+    format_info = json.loads(data[pos:pos+format_len].decode('utf-8'))
+    pos += format_len
+
+    values = [reconstruct_iso_timestamp(v, format_info) for v in ms_values]
+    return values, pos
+
+
+def decode_iso_timestamp_text_delta(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode ISO timestamp text-delta column."""
+    # Read format dictionary
+    n_formats, pos = decode_varint(data, pos)
+    format_list = []
+    for _ in range(n_formats):
+        has_quote = data[pos] == 1
+        pos += 1
+        has_comma = data[pos] == 1
+        pos += 1
+        ms_digits = data[pos]
+        pos += 1
+        tz_len, pos = decode_varint(data, pos)
+        tz = data[pos:pos+tz_len].decode('utf-8')
+        pos += tz_len
+        sep_len, pos = decode_varint(data, pos)
+        sep = data[pos:pos+sep_len].decode('utf-8')
+        pos += sep_len
+        format_list.append({
+            'has_quote': has_quote,
+            'has_comma': has_comma,
+            'ms_digits': ms_digits,
+            'tz': tz,
+            'separator': sep
+        })
+
+    # Read deltas
+    delta_len, pos = decode_varint(data, pos)
+    delta_text = data[pos:pos+delta_len].decode('utf-8')
+    pos += delta_len
+    deltas = delta_text.split('\n')
+
+    # Read format indices
+    fmt_len, pos = decode_varint(data, pos)
+    fmt_text = data[pos:pos+fmt_len].decode('utf-8')
+    pos += fmt_len
+    fmt_indices = [int(x) for x in fmt_text.split('\n')]
+
+    values = []
+    current = 0
+
+    for i, d in enumerate(deltas):
+        if d.startswith('R'):
+            values.append(unescape_raw_value(d[1:]))
+        else:
+            current += int(d)
+            fmt_idx = fmt_indices[i] if i < len(fmt_indices) else 0
+            fmt = format_list[fmt_idx] if fmt_idx < len(format_list) else {}
+            values.append(reconstruct_iso_timestamp(current, fmt))
+
+    return values, pos
+
+
+# ============================================================================
+# IPv4 Address Decoding
+# ============================================================================
+
+def decode_ipv4_column(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode IPv4 address column."""
+    min_val, pos = decode_varint(data, pos)
+
+    values = []
+    for _ in range(n_rows):
+        offset, pos = decode_varint(data, pos)
+        values.append(reconstruct_ipv4(min_val + offset))
+
+    return values, pos
+
+
+def decode_ipv4_text_delta(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode IPv4 text-delta column."""
+    delta_len, pos = decode_varint(data, pos)
+    delta_text = data[pos:pos+delta_len].decode('utf-8')
+    pos += delta_len
+
+    deltas = delta_text.split('\n')
+    values = []
+    current = 0
+
+    for d in deltas:
+        if d.startswith('R'):
+            values.append(unescape_raw_value(d[1:]))
+        else:
+            current += int(d)
+            values.append(reconstruct_ipv4(current))
+
+    return values, pos
+
+
+# ============================================================================
+# URL Path Decoding
+# ============================================================================
+
+def decode_path_column(data: bytes, pos: int, n_rows: int) -> Tuple[List[str], int]:
+    """Decode URL path column."""
+    # Read segment dictionary
+    n_segments, pos = decode_varint(data, pos)
+    segments = []
+    for _ in range(n_segments):
+        seg_len, pos = decode_varint(data, pos)
+        seg = data[pos:pos+seg_len].decode('utf-8')
+        pos += seg_len
+        segments.append(seg)
+
+    # Read raw value dictionary
+    n_raw, pos = decode_varint(data, pos)
+    raw_values = []
+    for _ in range(n_raw):
+        val_len, pos = decode_varint(data, pos)
+        val = data[pos:pos+val_len].decode('utf-8')
+        pos += val_len
+        raw_values.append(val)
+
+    # Read paths
+    values = []
+    for _ in range(n_rows):
+        n_path_segs, pos = decode_varint(data, pos)
+        if n_path_segs == 0xFFFF:
+            # Raw value - read index into raw dictionary
+            raw_idx, pos = decode_varint(data, pos)
+            if raw_idx < len(raw_values):
+                values.append(raw_values[raw_idx])
+            else:
+                values.append('')
+        else:
+            path_parts = []
+            for _ in range(n_path_segs):
+                seg_idx, pos = decode_varint(data, pos)
+                if seg_idx == 0xFFFE:
+                    path_parts.append('')  # Empty segment
+                elif seg_idx < len(segments):
+                    path_parts.append(segments[seg_idx])
+                else:
+                    path_parts.append('')
+            values.append('/'.join(path_parts))
+
+    return values, pos
+
+
+# ============================================================================
 # Line Format Detection
 # ============================================================================
 
@@ -1016,6 +1525,9 @@ class DrainState:
         self.template_cache: Dict[int, str] = {}  # cluster_id -> template
         self.template_to_id: Dict[str, int] = {}  # template -> output_id
         self.next_template_id = 0
+        self.cluster_index: Dict[int, Any] = {}  # cluster_id -> cluster (O(1) lookup)
+        self.lines_processed = 0
+        self.max_lines_per_chunk = 50000  # Limit to prevent runaway
 
         if HAS_DRAIN:
             self._init_miner()
@@ -1050,14 +1562,14 @@ max_children = 100
 
         cluster_id = result['cluster_id']
 
-        # Get template from the cluster (not from result dict - it may be empty on first line)
-        # Find the cluster and get its current template
-        cluster = None
-        for c in self.miner.drain.clusters:
-            if c.cluster_id == cluster_id:
-                cluster = c
-                break
+        # O(1) cluster lookup using index (update index if needed)
+        if cluster_id not in self.cluster_index:
+            # New cluster - add to index
+            for c in self.miner.drain.clusters:
+                if c.cluster_id not in self.cluster_index:
+                    self.cluster_index[c.cluster_id] = c
 
+        cluster = self.cluster_index.get(cluster_id)
         if not cluster:
             return -1, "", [line]
 
@@ -1080,7 +1592,12 @@ max_children = 100
         return template_id, template, variables
 
     def _preprocess(self, line: str) -> str:
-        """Compress multi-space sequences, handle leading tabs and trailing spaces."""
+        """Compress multi-space sequences, handle leading tabs and trailing spaces/CR."""
+        # Handle trailing \r (Windows line endings - Drain strips them)
+        has_cr = line.endswith('\r')
+        if has_cr:
+            line = line[:-1]
+
         # Handle leading tabs (Drain strips them)
         leading_tabs = 0
         while line and line[0] == '\t':
@@ -1117,10 +1634,20 @@ max_children = 100
                 line += MULTI_SPACE_PREFIX + str(chunk)
                 trailing -= chunk
 
+        # Add CR marker for Windows line endings
+        if has_cr:
+            line += MULTI_SPACE_PREFIX + 'R'
+
         return line
 
     def _postprocess(self, line: str) -> str:
-        """Restore multi-space sequences, leading tabs, and trailing spaces."""
+        """Restore multi-space sequences, leading tabs, trailing spaces/CR."""
+        # Restore trailing CR first (format: •R at end)
+        cr_marker = MULTI_SPACE_PREFIX + 'R'
+        has_cr = line.endswith(cr_marker)
+        if has_cr:
+            line = line[:-len(cr_marker)]
+
         # Restore leading tabs (format: •T<count>•)
         tab_pattern = MULTI_SPACE_PREFIX + r'T(\d)' + MULTI_SPACE_PREFIX
         m = re.match(tab_pattern, line)
@@ -1131,8 +1658,16 @@ max_children = 100
         # Restore multi-spaces (format: •<count>)
         def restore_spaces(match):
             return ' ' * int(match.group(1))
-        while MULTI_SPACE_PREFIX in line:
+        # Use a limited loop to prevent infinite loops
+        prev = None
+        while MULTI_SPACE_PREFIX in line and line != prev:
+            prev = line
             line = re.sub(MULTI_SPACE_PREFIX + r'(\d)', restore_spaces, line)
+
+        # Add back the CR
+        if has_cr:
+            line += '\r'
+
         return line
 
     def _extract_variables(self, line: str, template: str) -> List[str]:
@@ -1345,6 +1880,10 @@ class StreamingEncoder:
         # Track which templates have been written to stream (for incremental template writing)
         self.written_template_ids: Set[int] = set()
 
+        # Adaptive chunk sizing
+        self.current_chunk_size = self.config.initial_chunk_size
+        self.recent_ratios: List[float] = []  # Track recent chunk compression ratios
+
         # Write header
         self._write_header()
 
@@ -1378,10 +1917,8 @@ class StreamingEncoder:
         else:
             self._learn_text(line)
 
-        # Check if chunk is full
-        target_size = (self.config.initial_chunk_size if self.chunk_number == 0
-                       else self.config.chunk_size)
-        if len(self.chunk_lines) >= target_size:
+        # Check if chunk is full (using adaptive chunk size)
+        if len(self.chunk_lines) >= self.current_chunk_size:
             self._flush_chunk()
 
     def _learn_json(self, line: str):
@@ -1442,6 +1979,9 @@ class StreamingEncoder:
         if not self.chunk_lines:
             return
 
+        # Calculate raw size of this chunk
+        chunk_raw_size = sum(len(line.encode('utf-8')) + 1 for line in self.chunk_lines)
+
         chunk_data = self._encode_chunk()
         self.total_encoded_bytes += len(chunk_data)
 
@@ -1451,6 +1991,36 @@ class StreamingEncoder:
 
         # Update fallback state
         self._update_fallback_state()
+
+        # Adaptive chunk sizing
+        if self.config.adaptive_chunks and chunk_raw_size > 0:
+            ratio = len(chunk_data) / chunk_raw_size
+            self.recent_ratios.append(ratio)
+            # Keep only last 3 ratios
+            if len(self.recent_ratios) > 3:
+                self.recent_ratios.pop(0)
+
+            # Adjust chunk size based on average recent ratio
+            if len(self.recent_ratios) >= 2:
+                avg_ratio = sum(self.recent_ratios) / len(self.recent_ratios)
+
+                if avg_ratio < self.config.ratio_good_threshold:
+                    # Good compression - increase chunk size for more learning
+                    self.current_chunk_size = min(
+                        int(self.current_chunk_size * 1.5),
+                        self.config.max_chunk_size
+                    )
+                elif avg_ratio > self.config.ratio_bad_threshold:
+                    # Poor compression - decrease chunk size for faster output
+                    self.current_chunk_size = max(
+                        int(self.current_chunk_size * 0.75),
+                        self.config.min_chunk_size
+                    )
+                else:
+                    # Move toward default chunk size
+                    self.current_chunk_size = int(
+                        self.current_chunk_size * 0.9 + self.config.chunk_size * 0.1
+                    )
 
         # Clear buffer
         self.chunk_lines = []
@@ -1776,6 +2346,10 @@ class StreamingEncoder:
         # Use persistent miner for cross-chunk learning
         miner = self.drain_state.miner
 
+        # Skip mining if too many clusters (performance protection)
+        # Drain gets exponentially slower with more clusters
+        skip_mining = len(miner.drain.clusters) > 500
+
         # First pass: mine all templates with persistent miner
         line_clusters: List[Tuple[int, str]] = []  # (cluster_id, preprocessed_line)
         for line in lines:
@@ -1784,9 +2358,18 @@ class StreamingEncoder:
                 continue
 
             processed = self.drain_state._preprocess(line)
+
+            if skip_mining:
+                # Too many clusters - skip expensive mining
+                line_clusters.append((-1, line))
+                continue
+
             result = miner.add_log_message(processed)
             if result:
                 line_clusters.append((result['cluster_id'], processed))
+                # Check if we've hit the limit during this chunk
+                if len(miner.drain.clusters) > 500:
+                    skip_mining = True
             else:
                 line_clusters.append((-1, line))
 
@@ -2330,11 +2913,30 @@ class StreamingDecoder:
 
             reconstructed = ''.join(result)
 
-        # Restore multi-space (always, for all code paths)
+        # Restore trailing CR first (format: •R at end)
+        cr_marker = MULTI_SPACE_PREFIX + 'R'
+        has_cr = reconstructed.endswith(cr_marker)
+        if has_cr:
+            reconstructed = reconstructed[:-len(cr_marker)]
+
+        # Restore leading tabs (format: •T<count>•)
+        tab_pattern = MULTI_SPACE_PREFIX + r'T(\d)' + MULTI_SPACE_PREFIX
+        m = re.match(tab_pattern, reconstructed)
+        if m:
+            tabs = '\t' * int(m.group(1))
+            reconstructed = tabs + reconstructed[m.end():]
+
+        # Restore multi-space (format: •<count>)
         def restore_spaces(match):
             return ' ' * int(match.group(1))
-        while MULTI_SPACE_PREFIX in reconstructed:
+        prev = None
+        while MULTI_SPACE_PREFIX in reconstructed and reconstructed != prev:
+            prev = reconstructed
             reconstructed = re.sub(MULTI_SPACE_PREFIX + r'(\d)', restore_spaces, reconstructed)
+
+        # Add back CR
+        if has_cr:
+            reconstructed += '\r'
 
         return reconstructed
 
