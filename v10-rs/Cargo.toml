@@ -1,0 +1,20 @@
+[package]
+name = "v10_streaming"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zstd = "0.13"
+memchr = "2.7"
+regex = "1.10"
+lazy_static = "1.4"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[[bin]]
+name = "v10c"
+path = "src/main.rs"
